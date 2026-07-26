@@ -2,6 +2,8 @@
 
 A **Pi-hole-style DNS ad-blocker** that runs on a **$2 ESP32-C3** — *no PSRAM required*.
 
+> 📰 Featured on [Tom's Hardware](https://www.tomshardware.com/networking/clever-hacker-fits-537-000-domains-in-a-tiny-usd5-esp32-ad-blocking-dongle-firmware-uses-only-around-50kb-of-ram-and-can-answer-blocked-lookups-in-10-milliseconds), [XDA Developers](https://www.xda-developers.com/this-tiny-esp32-powered-gadget-blocks-537000-domains-only-uses-50kb-of-ram/), and [Korben](https://korben.info/en/half-million-ad-blocking-domains-50kb-ram-esp32.html).
+
 The trick everyone misses: you don't need to keep the blocklist in RAM. Store the
 domains as **sorted 40-bit hashes in flash** and binary-search them. 140,000+ domains
 fit in ~0.7 MB of flash and are matched in ~10 ms, using **~50 KB of RAM**.
@@ -59,6 +61,11 @@ Printing notes:
 ## Build & flash (PlatformIO)
 
 One USB flash to get going — after that, **firmware and blocklist both update over WiFi** (see below).
+
+> ⚠️ Use a **current PlatformIO** — the VSCode PlatformIO extension's bundled core, or
+> `pip install -U platformio` in a venv. The distro/apt `platformio` package (e.g. 4.3.4) is
+> too old and fails with `AttributeError: ... 'resultcallback'` (issue #4). A one-click browser
+> web-installer is coming so you won't need PlatformIO at all.
 
 ```bash
 # 1. set your WiFi creds (secrets.h is gitignored, so they stay local)
