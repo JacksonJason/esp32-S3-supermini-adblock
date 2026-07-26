@@ -13,9 +13,12 @@
 #include <HTTPClient.h>        // remote blocklist fetch
 #include <WiFiClientSecure.h>  // https fetch
 #include <ArduinoOTA.h>        // network firmware flashing (pio run over wifi)
+#include <DNSServer.h>         // captive-portal catch-all DNS
+#include <Preferences.h>       // NVS store for provisioned WiFi creds
 #include "lwip/etharp.h"
 #include "lwip/netif.h"
-#include "secrets.h"   // defines WIFI_SSID / WIFI_PASS — copy secrets.example.h and fill in
+#include "secrets.h"   // WIFI_SSID / WIFI_PASS — used only as a FALLBACK if no creds
+                       // have been provisioned via the captive portal (copy secrets.example.h)
 
 // ---- config ----
 static const IPAddress UPSTREAM(9, 9, 9, 9);     // Quad9
@@ -46,6 +49,11 @@ String updateUrl = "";              // URL of a prebuilt blocklist.bin (e.g. Git
 uint32_t updateIntervalH = 24;      // hours between auto-fetches
 uint32_t lastCheckMs = 0;
 String updateStatus = "never";
+
+// WiFi provisioning (captive portal)
+Preferences prefs;
+DNSServer   dnsPortal;
+String      portalOpts;             // <option> list of scanned networks, built once at portal start
 
 // ---------- hashing / matching ----------
 static uint64_t fnv40(const char* s, size_t n) {
@@ -313,6 +321,69 @@ static void handleFwUpload() {
   }
 }
 
+// ---------- WiFi provisioning (captive portal) ----------
+// Try provisioned NVS creds first, then the compile-time secrets.h creds as a
+// fallback (so the maintainer's own device + source builders keep working). If
+// neither connects, fall through to the config portal.
+static bool connectWiFi() {
+  prefs.begin("wifi", true);
+  String ss = prefs.getString("ssid", "");
+  String pw = prefs.getString("pass", "");
+  prefs.end();
+  const char* ssid = ss.length() ? ss.c_str() : WIFI_SSID;
+  const char* pass = ss.length() ? pw.c_str() : WIFI_PASS;
+  if (!ssid || !*ssid || strcmp(ssid, "YOUR_WIFI_SSID") == 0) return false;  // unconfigured
+  Serial.printf("WiFi: connecting to \"%s\"%s\n", ssid, ss.length() ? " (provisioned)" : " (secrets.h)");
+  WiFi.mode(WIFI_STA); WiFi.setSleep(false); WiFi.begin(ssid, pass);
+  uint32_t t0 = millis();
+  while (WiFi.status() != WL_CONNECTED && millis() - t0 < 20000) { delay(250); Serial.print("."); }
+  Serial.println();
+  return WiFi.status() == WL_CONNECTED;
+}
+
+static void handlePortalRoot() {
+  String html =
+    "<!doctype html><meta charset=utf-8><meta name=viewport content='width=device-width,initial-scale=1'>"
+    "<title>C3 AdBlock setup</title>"
+    "<body style='font:16px system-ui,sans-serif;max-width:420px;margin:36px auto;padding:0 16px;background:#0d1117;color:#c9d1d9'>"
+    "<h2>&#128737; C3 AdBlock &mdash; WiFi setup</h2>"
+    "<p style='color:#8b949e'>Pick your network and enter its password. The device restarts and joins it.</p>"
+    "<form method=POST action=/wifisave>"
+    "<input list=nets name=s placeholder='WiFi name' required style='width:100%;box-sizing:border-box;padding:11px;margin:6px 0;border-radius:6px;border:1px solid #30363d;background:#161b22;color:#c9d1d9'>"
+    "<datalist id=nets>" + portalOpts + "</datalist>"
+    "<input name=p type=password placeholder='Password' style='width:100%;box-sizing:border-box;padding:11px;margin:6px 0;border-radius:6px;border:1px solid #30363d;background:#161b22;color:#c9d1d9'>"
+    "<button style='width:100%;padding:12px;margin-top:8px;border-radius:6px;border:0;background:#3fb950;color:#000;font-weight:600;cursor:pointer'>Connect</button>"
+    "</form></body>";
+  web.send(200, "text/html", html);
+}
+static void handleWifiSave() {
+  String ss = web.arg("s"), pw = web.arg("p");
+  if (!ss.length()) { web.send(400, "text/plain", "missing WiFi name"); return; }
+  prefs.begin("wifi", false); prefs.putString("ssid", ss); prefs.putString("pass", pw); prefs.end();
+  web.send(200, "text/html", "<!doctype html><meta charset=utf-8><body style='font:16px system-ui;text-align:center;margin-top:60px'>"
+                             "&#9989; Saved. Restarting and joining <b>" + ss + "</b>&hellip;<br><br>"
+                             "Reconnect your phone to your normal WiFi, then find the box at <b>c3adblock.local</b>.</body>");
+  delay(900); ESP.restart();
+}
+// Never returns — blocks in the portal loop until creds are saved (then reboots).
+static void startConfigPortal() {
+  int n = WiFi.scanNetworks();                 // scan while still in STA mode (no APSTA)
+  portalOpts = "";
+  for (int i = 0; i < n && i < 15; i++) portalOpts += "<option value='" + jesc(WiFi.SSID(i)) + "'>";
+  uint8_t mac[6]; WiFi.macAddress(mac);
+  char ap[24]; snprintf(ap, sizeof(ap), "C3-AdBlock-%02X%02X", mac[4], mac[5]);
+  WiFi.mode(WIFI_AP); WiFi.softAP(ap);
+  IPAddress apIP = WiFi.softAPIP();
+  dnsPortal.start(53, "*", apIP);              // catch-all -> phones pop the captive portal
+  web.on("/", handlePortalRoot);
+  web.on("/wifisave", HTTP_POST, handleWifiSave);
+  web.onNotFound(handlePortalRoot);            // any captive-portal probe -> the form
+  web.begin();
+  Serial.printf("\n[setup] No WiFi. Join open network \"%s\" and a setup page pops up (or http://%s)\n",
+                ap, apIP.toString().c_str());
+  while (true) { dnsPortal.processNextRequest(); web.handleClient(); delay(2); }
+}
+
 void setup() {
   Serial.begin(115200); delay(300);
   Serial.println("\n[c3-adblock] booting");
@@ -322,9 +393,14 @@ void setup() {
   loadCustom(); loadBanned(); loadUpdateCfg();
   Serial.printf("custom: %d, banned: %d\n", numCustom, numBanned);
 
-  WiFi.mode(WIFI_STA); WiFi.setSleep(false); WiFi.begin(WIFI_SSID, WIFI_PASS);
-  Serial.print("WiFi"); while (WiFi.status() != WL_CONNECTED) { delay(300); Serial.print("."); }
-  Serial.printf("\nWiFi up: %s\n", WiFi.localIP().toString().c_str());
+  // Hold BOOT (GPIO9) at power-on to wipe saved WiFi and force the setup portal.
+  pinMode(9, INPUT_PULLUP);
+  if (digitalRead(9) == LOW) { delay(60);
+    if (digitalRead(9) == LOW) { prefs.begin("wifi", false); prefs.clear(); prefs.end();
+      Serial.println("[setup] BOOT held -> cleared saved WiFi"); } }
+
+  if (!connectWiFi()) startConfigPortal();   // portal blocks + reboots on save; returns only when connected
+  Serial.printf("WiFi up: %s\n", WiFi.localIP().toString().c_str());
   if (MDNS.begin("c3adblock")) { MDNS.addService("http", "tcp", 80); Serial.println("dashboard: http://c3adblock.local"); }
 
   dnsServer.begin(DNS_PORT); upstreamCli.begin(0);
@@ -333,6 +409,8 @@ void setup() {
   web.on("/ban", handleBan);
   web.on("/addblock", []() { addCustom(web.arg("d")); web.send(200, "text/plain", "ok"); });
   web.on("/unblock", []() { removeCustom(web.arg("d")); web.send(200, "text/plain", "ok"); });
+  web.on("/forgetwifi", []() { web.send(200, "text/plain", "cleared — rebooting into setup portal");
+    prefs.begin("wifi", false); prefs.clear(); prefs.end(); delay(500); ESP.restart(); });
   web.on("/upload", HTTP_POST, handleUploadDone, handleUpload);      // blocklist OTA
   web.on("/update", HTTP_POST, handleFwUpdateDone, handleFwUpload);  // firmware OTA
   web.on("/fetchnow", []() { fetchBlocklist(updateUrl); web.send(200, "text/plain", updateStatus); });

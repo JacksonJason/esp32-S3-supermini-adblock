@@ -68,7 +68,8 @@ One USB flash to get going — after that, **firmware and blocklist both update 
 > web-installer is coming so you won't need PlatformIO at all.
 
 ```bash
-# 1. set your WiFi creds (secrets.h is gitignored, so they stay local)
+# 1. (optional) set WiFi creds at compile time — or skip this and use the
+#    on-device setup portal (below). secrets.h is gitignored, stays local.
 cp src/secrets.example.h src/secrets.h
 #    then edit src/secrets.h -> WIFI_SSID / WIFI_PASS
 
@@ -83,6 +84,13 @@ pio run -t uploadfs
 # 4. watch it boot, note the IP / open the dashboard
 pio device monitor          # -> http://c3adblock.local
 ```
+
+### WiFi setup (no re-flash needed)
+
+If it can't connect (or you never set `secrets.h`), it starts an open access point
+**`C3-AdBlock-XXXX`** with a captive portal — join it from a phone, pick your network,
+type the password, done. To move it to a new network later: open `http://c3adblock.local/forgetwifi`,
+or hold the **BOOT** button while powering on, and the setup portal comes back.
 
 ## Over-the-air updates (no more USB)
 
