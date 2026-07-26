@@ -2,8 +2,6 @@
 
 A **Pi-hole-style DNS ad-blocker** that runs on a **$2 ESP32-C3** — *no PSRAM required*.
 
-**⚡ [Install it in your browser](https://www.muhammedabozaid.com/esp32-c3-adblock/)** — plug in an ESP32-C3, click once, done (Chrome/Edge, no toolchain).
-
 > 📰 Featured on [Tom's Hardware](https://www.tomshardware.com/networking/clever-hacker-fits-537-000-domains-in-a-tiny-usd5-esp32-ad-blocking-dongle-firmware-uses-only-around-50kb-of-ram-and-can-answer-blocked-lookups-in-10-milliseconds), [XDA Developers](https://www.xda-developers.com/this-tiny-esp32-powered-gadget-blocks-537000-domains-only-uses-50kb-of-ram/), and [Korben](https://korben.info/en/half-million-ad-blocking-domains-50kb-ram-esp32.html).
 
 The trick everyone misses: you don't need to keep the blocklist in RAM. Store the
@@ -66,8 +64,7 @@ One USB flash to get going — after that, **firmware and blocklist both update 
 
 > ⚠️ Use a **current PlatformIO** — the VSCode PlatformIO extension's bundled core, or
 > `pip install -U platformio` in a venv. The distro/apt `platformio` package (e.g. 4.3.4) is
-> too old and fails with `AttributeError: ... 'resultcallback'` (issue #4). Or skip PlatformIO
-> entirely with the [one-click browser installer](https://www.muhammedabozaid.com/esp32-c3-adblock/) linked up top.
+> too old and fails with `AttributeError: ... 'resultcallback'` (issue #4). A one-click browser installer is on the way (hosting TBD).
 
 ```bash
 # 1. (optional) set WiFi creds at compile time — or skip this and use the
