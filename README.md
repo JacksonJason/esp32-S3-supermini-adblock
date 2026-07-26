@@ -2,6 +2,8 @@
 
 A **Pi-hole-style DNS ad-blocker** that runs on a **$2 ESP32-C3** — *no PSRAM required*.
 
+**⚡ [Install it in your browser](https://www.muhammedabozaid.com/esp32-c3-adblock/)** — plug in an ESP32-C3, click once, done (Chrome/Edge, no toolchain).
+
 > 📰 Featured on [Tom's Hardware](https://www.tomshardware.com/networking/clever-hacker-fits-537-000-domains-in-a-tiny-usd5-esp32-ad-blocking-dongle-firmware-uses-only-around-50kb-of-ram-and-can-answer-blocked-lookups-in-10-milliseconds), [XDA Developers](https://www.xda-developers.com/this-tiny-esp32-powered-gadget-blocks-537000-domains-only-uses-50kb-of-ram/), and [Korben](https://korben.info/en/half-million-ad-blocking-domains-50kb-ram-esp32.html).
 
 The trick everyone misses: you don't need to keep the blocklist in RAM. Store the
