@@ -66,8 +66,8 @@ One USB flash to get going — after that, **firmware and blocklist both update 
 
 > ⚠️ Use a **current PlatformIO** — the VSCode PlatformIO extension's bundled core, or
 > `pip install -U platformio` in a venv. The distro/apt `platformio` package (e.g. 4.3.4) is
-> too old and fails with `AttributeError: ... 'resultcallback'` (issue #4). A one-click browser
-> web-installer is coming so you won't need PlatformIO at all.
+> too old and fails with `AttributeError: ... 'resultcallback'` (issue #4). Or skip PlatformIO
+> entirely with the [one-click browser installer](https://www.muhammedabozaid.com/esp32-c3-adblock/) linked up top.
 
 ```bash
 # 1. (optional) set WiFi creds at compile time — or skip this and use the
@@ -140,7 +140,8 @@ dig @<c3-ip> github.com        # -> real IP  (forwarded)
 - ✅ Web dashboard — per-client block/allow counts, ban a client, add custom domains
 - ✅ mDNS (`c3adblock.local`) for discovery
 - ✅ OTA — firmware + blocklist update over WiFi, plus scheduled remote blocklist pulls
-- ⬜ Bloom filter in RAM as a fast pre-filter (skip flash for the ~99% of misses)
+- ✅ Captive-portal WiFi setup (no hardcoded creds) + one-click browser web-installer
+- ⬜ Bucketed prefix index — ~18 flash reads/lookup → ~1–2 (issue #3), the throughput win
 - ⬜ Act as the DHCP server (hand itself out as DNS) for true plug-and-play
 
 ## Credits
