@@ -19,6 +19,10 @@ button:hover{background:#30363d}.ban{color:#f85149}input{background:#0d1117;bord
 h2{font-size:14px;color:#8b949e;margin:18px 0 8px}
 </style></head><body>
 <header><h1>🛡️ C3 AdBlock <span id=host></span></h1></header><div class=wrap>
+<div id=blockbar style="display:flex;align-items:center;gap:12px;margin-bottom:14px;padding:12px 14px;background:#161b22;border:1px solid #30363d;border-radius:8px">
+<span id=blockdot style=font-size:20px>🛡️</span><b id=blockstate style=flex:1 data-on=1>Blocking active</b>
+<select id=pausedur style="background:#0d1117;border:1px solid #30363d;color:#c9d1d9;border-radius:5px;padding:5px"><option value=30>30s</option><option value=300 selected>5 min</option><option value=1800>30 min</option><option value=0>until I re-enable</option></select>
+<button id=pausebtn onclick=togglePause()>Pause</button></div>
 <div class=cards id=sys></div>
 <h2>CLIENTS</h2><table id=ct><thead><tr><th>Client</th><th>MAC</th><th>Blocked</th><th>Allowed</th><th></th></tr></thead><tbody></tbody></table>
 <h2>CUSTOM BLOCKED DOMAINS</h2>
@@ -36,8 +40,13 @@ h2{font-size:14px;color:#8b949e;margin:18px 0 8px}
 <div style="color:#8b949e;font-size:12px;margin-bottom:18px">upload <code>.pio/build/c3/firmware.bin</code> &mdash; device verifies it and reboots into it</div>
 </div><script>
 function fmt(n){return n.toLocaleString()}
+function togglePause(){if(blockstate.dataset.on=='1')fetch('/pause?s='+pausedur.value).then(load);else fetch('/resume').then(load);}
 async function load(){let s=await(await fetch('/stats.json')).json();
 host.textContent='@ '+s.ip;
+let on=s.blocking!==false;blockstate.dataset.on=on?'1':'0';
+blockdot.textContent=on?'🛡️':'⏸️';blockbar.style.borderColor=on?'#30363d':'#f0883e';
+blockstate.textContent=on?'Blocking active':(s.resumeIn>0?'Paused — resumes in '+s.resumeIn+'s':'Paused');
+pausebtn.textContent=on?'Pause':'Resume';pausedur.style.display=on?'':'none';
 sys.innerHTML=[['Total blocked',fmt(s.blocked),'b'],['Total allowed',fmt(s.allowed),'a'],['Blocklist',fmt(s.domains)+' domains',''],
 ['Clients',s.clients.length,''],['WiFi',s.rssi+' dBm',''],['Temp',s.temp+' °C',''],['Free RAM',Math.round(s.heap/1024)+' KB',''],['Uptime',s.uptime,'']]
 .map(c=>`<div class=card><div class="v ${c[2]}">${c[1]}</div><div class=l>${c[0]}</div></div>`).join('');

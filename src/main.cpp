@@ -55,6 +55,10 @@ Preferences prefs;
 DNSServer   dnsPortal;
 String      portalOpts;             // <option> list of scanned networks, built once at portal start
 
+// blocking pause (Pi-hole-style "disable for a while")
+bool     blockingOn = true;
+uint32_t resumeAt   = 0;            // millis() to auto-resume; 0 = paused indefinitely / not paused
+
 // ---------- hashing / matching ----------
 static uint64_t fnv40(const char* s, size_t n) {
   uint64_t h = 0xcbf29ce484222325ULL;
@@ -172,7 +176,7 @@ static bool handleDns() {
     size_t dl = parseQuery(buf, qlen, domain, &qtype, &qend);
     Dev* c = getClient((uint32_t)cip);
     bool ban = c && c->banned;
-    bool blocked = ban || (dl && numHashes && isBlocked(domain));
+    bool blocked = ban || (blockingOn && dl && numHashes && isBlocked(domain));
     int rlen;
     if (blocked) { rlen = buildBlocked(qend, qtype); totalBlocked++; if (c) c->blocked++; }
     else         { rlen = forwardUpstream(qlen);     totalAllowed++; if (c) c->allowed++; }
@@ -194,6 +198,8 @@ static void handleStats() {
              ",\"domains\":" + numHashes + ",\"rssi\":" + WiFi.RSSI() + ",\"temp\":" + String(temperatureRead(), 1) +
              ",\"heap\":" + ESP.getFreeHeap() + ",\"uptime\":\"" + ut + "\"" +
              ",\"upurl\":\"" + jesc(updateUrl) + "\",\"upiv\":" + updateIntervalH + ",\"upstat\":\"" + jesc(updateStatus) + "\"" +
+             ",\"blocking\":" + (blockingOn ? "true" : "false") +
+             ",\"resumeIn\":" + (uint32_t)(!blockingOn && resumeAt ? (resumeAt - millis()) / 1000 : 0) +
              ",\"clients\":[";
   for (int i = 0; i < numClients; i++) { Dev& c = clients[i]; IPAddress ip(c.ip);
     j += (i ? "," : ""); j += "{\"ip\":\"" + ip.toString() + "\",\"mac\":\"" + macStr(c.mac) + "\",\"blocked\":" + c.blocked + ",\"allowed\":" + c.allowed + ",\"banned\":" + (c.banned?"true":"false") + "}"; }
@@ -409,6 +415,12 @@ void setup() {
   web.on("/ban", handleBan);
   web.on("/addblock", []() { addCustom(web.arg("d")); web.send(200, "text/plain", "ok"); });
   web.on("/unblock", []() { removeCustom(web.arg("d")); web.send(200, "text/plain", "ok"); });
+  web.on("/pause", []() {                    // /pause?s=300  (0 or absent = indefinite)
+    long s = web.hasArg("s") ? web.arg("s").toInt() : 0;
+    blockingOn = false; resumeAt = (s > 0) ? millis() + (uint32_t)s * 1000UL : 0;
+    web.send(200, "text/plain", "paused");
+  });
+  web.on("/resume", []() { blockingOn = true; resumeAt = 0; web.send(200, "text/plain", "resumed"); });
   web.on("/forgetwifi", []() { web.send(200, "text/plain", "cleared — rebooting into setup portal");
     prefs.begin("wifi", false); prefs.clear(); prefs.end(); delay(500); ESP.restart(); });
   web.on("/upload", HTTP_POST, handleUploadDone, handleUpload);      // blocklist OTA
@@ -429,6 +441,7 @@ void loop() {
   ArduinoOTA.handle();
   web.handleClient();
   bool busy = handleDns();
+  if (!blockingOn && resumeAt && (int32_t)(millis() - resumeAt) >= 0) { blockingOn = true; resumeAt = 0; }
   if (updateUrl.length()) {               // periodic remote blocklist auto-update
     uint32_t now = millis();
     if (lastCheckMs == 0) lastCheckMs = now;   // skip an immediate fetch on boot
