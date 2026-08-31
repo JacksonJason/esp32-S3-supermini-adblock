@@ -15,6 +15,9 @@
 #include <ArduinoOTA.h>        // network firmware flashing (pio run over wifi)
 #include <DNSServer.h>         // captive-portal catch-all DNS
 #include <Preferences.h>       // NVS store for provisioned WiFi creds
+#include "esp_system.h"
+#include "esp_task_wdt.h"
+#include <stdarg.h>
 #include "lwip/etharp.h"
 #include "lwip/netif.h"
 #include "secrets.h"   // WIFI_SSID / WIFI_PASS — used only as a FALLBACK if no creds
@@ -26,6 +29,11 @@ static const uint16_t DNS_PORT = 53;
 static const char* BLOCKLIST_PATH = "/blocklist.bin";
 static const int HASH_BYTES = 5;
 static const uint64_t HASH_MASK = (1ULL << (HASH_BYTES * 8)) - 1;
+static const uint32_t DNS_FAILURE_WARN_THRESHOLD = 10;
+static const uint32_t DNS_FAILURE_RESTART_THRESHOLD = 30;
+static const uint32_t DNS_NO_SUCCESS_RESTART_MS = 60000;
+static const uint32_t WIFI_DISCONNECTED_RESTART_MS = 30000;
+static const size_t DIAG_LOG_MAX_BYTES = 12288;
 
 // ---- globals ----
 WiFiUDP dnsServer, upstreamCli;
@@ -33,6 +41,11 @@ WebServer web(80);
 File blocklist;
 uint32_t numHashes = 0, totalBlocked = 0, totalAllowed = 0;
 uint8_t buf[600];
+uint8_t upstreamBuf[600];
+uint32_t dnsConsecutiveFailures = 0, dnsTotalFailures = 0, dnsTotalSuccesses = 0;
+uint32_t lastSuccessfulDnsMs = 0, wifiDisconnectedSinceMs = 0;
+bool littleFsReady = false, watchdogReady = false, restartPending = false;
+String currentResetReason, previousRestartReason;
 
 struct Dev { uint32_t ip; uint8_t mac[6]; uint32_t blocked, allowed, lastSeen; bool banned; String label; };
 static const int MAX_CLIENTS = 96;
@@ -58,6 +71,48 @@ String      portalOpts;             // <option> list of scanned networks, built 
 // blocking pause (Pi-hole-style "disable for a while")
 bool     blockingOn = true;
 uint32_t resumeAt   = 0;            // millis() to auto-resume; 0 = paused indefinitely / not paused
+
+static void feedWatchdog() { if (watchdogReady) esp_task_wdt_reset(); }
+static const char* resetReasonName(esp_reset_reason_t reason) {
+  switch (reason) {
+    case ESP_RST_POWERON: return "power on";
+    case ESP_RST_SW: return "software";
+    case ESP_RST_PANIC: return "panic";
+    case ESP_RST_TASK_WDT: return "task watchdog";
+    case ESP_RST_WDT: return "watchdog";
+    case ESP_RST_BROWNOUT: return "brownout";
+    default: return "other";
+  }
+}
+static void diagLog(const char* format, ...) {
+  char message[240]; va_list args; va_start(args, format); vsnprintf(message, sizeof(message), format, args); va_end(args);
+  char line[280]; snprintf(line, sizeof(line), "[%lus] %s\n", millis() / 1000, message);
+  Serial.print(line);
+  if (!littleFsReady) return;
+  File log = LittleFS.open("/diagnostics.log", "a"); if (!log) return;
+  log.print(line); size_t size = log.size(); log.close();
+  if (size <= DIAG_LOG_MAX_BYTES) return;
+  log = LittleFS.open("/diagnostics.log", "r"); if (!log) return;
+  String retained = log.readString(); log.close();
+  size_t target = DIAG_LOG_MAX_BYTES - 1024;
+  size_t cut = retained.length() > target ? retained.indexOf('\n', retained.length() - target) : 0;
+  retained = cut == (size_t)-1 ? retained.substring(retained.length() - target) : retained.substring(cut + 1);
+  log = LittleFS.open("/diagnostics.log", "w"); if (log) { log.print(retained); log.close(); }
+}
+static void loadRestartReason() {
+  Preferences restartPrefs; restartPrefs.begin("reliability", false);
+  previousRestartReason = restartPrefs.getString("lastReason", "");
+  restartPrefs.remove("lastReason"); restartPrefs.end();
+}
+static void restartForReliability(const char* reason) {
+  if (restartPending) return;
+  restartPending = true;
+  Preferences restartPrefs; restartPrefs.begin("reliability", false); restartPrefs.putString("lastReason", reason); restartPrefs.end();
+  diagLog("[RELIABILITY] AUTOMATIC RESTART: %s; DNS failures %lu consecutive/%lu total, successes %lu, heap %u, WiFi %d",
+          reason, dnsConsecutiveFailures, dnsTotalFailures, dnsTotalSuccesses, ESP.getFreeHeap(), WiFi.status());
+  for (int i = 0; i < 30; i++) { feedWatchdog(); delay(10); }
+  ESP.restart();
+}
 
 // ---------- hashing / matching ----------
 static uint64_t fnv40(const char* s, size_t n) {
@@ -158,29 +213,69 @@ static int buildBlocked(int qend, uint16_t qtype) {
   memcpy(buf + qend, ans, sizeof(ans)); return qend + sizeof(ans);
 }
 static int forwardUpstream(int qlen) {
-  upstreamCli.beginPacket(UPSTREAM, 53); upstreamCli.write(buf, qlen); upstreamCli.endPacket();
+  while (upstreamCli.parsePacket() > 0) {
+    while (upstreamCli.available()) upstreamCli.read(upstreamBuf, sizeof(upstreamBuf));
+    upstreamCli.flush();
+  }
+
+  uint8_t query[sizeof(buf)];
+  memcpy(query, buf, qlen);
+  uint16_t clientId = ((uint16_t)query[0] << 8) | query[1];
+  uint16_t upstreamId = (uint16_t)esp_random();
+  query[0] = upstreamId >> 8; query[1] = upstreamId & 0xff;
+
+  upstreamCli.beginPacket(UPSTREAM, 53); upstreamCli.write(query, qlen); upstreamCli.endPacket();
   uint32_t t0 = millis();
-  while (millis() - t0 < 1000) { int sz = upstreamCli.parsePacket(); if (sz > 0) return upstreamCli.read(buf, sizeof(buf)); delay(1); }
+  while (millis() - t0 < 750) {
+    int sz = upstreamCli.parsePacket();
+    if (sz > 0) {
+      IPAddress sourceIp = upstreamCli.remoteIP(); uint16_t sourcePort = upstreamCli.remotePort();
+      int rlen = upstreamCli.read(upstreamBuf, sizeof(upstreamBuf));
+      upstreamCli.flush();
+      bool valid = sourceIp == UPSTREAM && sourcePort == DNS_PORT &&
+                   rlen >= qlen && rlen <= (int)sizeof(buf) &&
+                   upstreamBuf[0] == query[0] && upstreamBuf[1] == query[1] &&
+                   memcmp(upstreamBuf + 12, query + 12, qlen - 12) == 0;
+      if (valid) {
+        memcpy(buf, upstreamBuf, rlen);
+        buf[0] = clientId >> 8; buf[1] = clientId & 0xff;
+        dnsTotalSuccesses++; dnsConsecutiveFailures = 0; lastSuccessfulDnsMs = millis();
+        return rlen;
+      }
+    }
+    feedWatchdog(); delay(1);
+  }
+  dnsTotalFailures++; dnsConsecutiveFailures++;
+  if (dnsConsecutiveFailures == DNS_FAILURE_WARN_THRESHOLD)
+    diagLog("[DNS] %lu consecutive upstream failures", dnsConsecutiveFailures);
+  if (dnsConsecutiveFailures >= DNS_FAILURE_RESTART_THRESHOLD)
+    restartForReliability("too many consecutive upstream DNS failures");
   return 0;
 }
 // Drain a whole RX burst per call (capped, so web/OTA still get a turn) instead of
 // one packet per loop iteration. Returns true if any query was handled this call.
 static bool handleDns() {
   bool did = false;
-  for (int budget = 0; budget < 16; budget++) {
+  for (int budget = 0; budget < 8; budget++) {
     int sz = dnsServer.parsePacket(); if (sz <= 0) break;
     did = true;
     IPAddress cip = dnsServer.remoteIP(); uint16_t cport = dnsServer.remotePort();
-    int qlen = dnsServer.read(buf, sizeof(buf)); if (qlen < 13) continue;
-    char domain[256]; uint16_t qtype = 0; int qend = qlen;
-    size_t dl = parseQuery(buf, qlen, domain, &qtype, &qend);
-    Dev* c = getClient((uint32_t)cip);
-    bool ban = c && c->banned;
-    bool blocked = ban || (blockingOn && dl && numHashes && isBlocked(domain));
-    int rlen;
-    if (blocked) { rlen = buildBlocked(qend, qtype); totalBlocked++; if (c) c->blocked++; }
-    else         { rlen = forwardUpstream(qlen);     totalAllowed++; if (c) c->allowed++; }
-    if (rlen > 0) { dnsServer.beginPacket(cip, cport); dnsServer.write(buf, rlen); dnsServer.endPacket(); }
+    int qlen = dnsServer.read(buf, sizeof(buf));
+    if (qlen >= 13) {
+      char domain[256]; uint16_t qtype = 0; int qend = qlen;
+      size_t dl = parseQuery(buf, qlen, domain, &qtype, &qend);
+      Dev* c = getClient((uint32_t)cip);
+      bool ban = c && c->banned;
+      bool blocked = ban || (blockingOn && dl && numHashes && isBlocked(domain));
+      int rlen;
+      if (blocked) { rlen = buildBlocked(qend, qtype); totalBlocked++; if (c) c->blocked++; }
+      else {
+        rlen = forwardUpstream(qlen);
+        if (rlen > 0) { totalAllowed++; if (c) c->allowed++; }
+      }
+      if (rlen > 0) { dnsServer.beginPacket(cip, cport); dnsServer.write(buf, rlen); dnsServer.endPacket(); }
+    }
+    feedWatchdog(); yield();
   }
   return did;
 }
@@ -188,6 +283,9 @@ static bool handleDns() {
 // ---------- web ----------
 static String macStr(const uint8_t* m) { char s[18]; snprintf(s, sizeof(s), "%02x:%02x:%02x:%02x:%02x:%02x", m[0],m[1],m[2],m[3],m[4],m[5]); return String(s); }
 static String jesc(const String& s) { String o; for (char ch : s) { if (ch == '"' || ch == '\\') o += '\\'; o += ch; } return o; }
+static String hesc(const String& s) {
+  String o; for (char ch : s) { if (ch == '&') o += "&amp;"; else if (ch == '<') o += "&lt;"; else if (ch == '>') o += "&gt;"; else o += ch; } return o;
+}
 
 #include "page.h"   // dashboard HTML (PROGMEM) — see issue #6
 
@@ -197,6 +295,10 @@ static void handleStats() {
   String j = "{\"ip\":\"" + WiFi.localIP().toString() + "\",\"blocked\":" + totalBlocked + ",\"allowed\":" + totalAllowed +
              ",\"domains\":" + numHashes + ",\"rssi\":" + WiFi.RSSI() + ",\"temp\":" + String(temperatureRead(), 1) +
              ",\"heap\":" + ESP.getFreeHeap() + ",\"uptime\":\"" + ut + "\"" +
+             ",\"psram\":" + (psramFound() ? ESP.getFreePsram() : 0) +
+             ",\"dnsFailures\":" + dnsTotalFailures + ",\"dnsSuccesses\":" + dnsTotalSuccesses +
+             ",\"dnsConsecutiveFailures\":" + dnsConsecutiveFailures + ",\"resetReason\":\"" + jesc(currentResetReason) + "\"" +
+             ",\"lastRestartReason\":\"" + jesc(previousRestartReason) + "\"" +
              ",\"upurl\":\"" + jesc(updateUrl) + "\",\"upiv\":" + updateIntervalH + ",\"upstat\":\"" + jesc(updateStatus) + "\"" +
              ",\"blocking\":" + (blockingOn ? "true" : "false") +
              ",\"resumeIn\":" + (uint32_t)(!blockingOn && resumeAt ? (resumeAt - millis()) / 1000 : 0) +
@@ -208,6 +310,22 @@ static void handleStats() {
   j += "]}";
   web.send(200, "application/json", j);
 }
+static String readDiagnostics() {
+  File log = LittleFS.open("/diagnostics.log", "r"); if (!log) return "No diagnostic events recorded.\n";
+  String text = log.readString(); log.close(); return text;
+}
+static void handleLogs() {
+  String page = "<!doctype html><meta charset=utf-8><meta name=viewport content='width=device-width,initial-scale=1'>"
+                "<title>AdBlock diagnostics</title><body style='font:14px system-ui;max-width:1000px;margin:24px auto;padding:0 16px'>"
+                "<p><a href='/'>Dashboard</a> <button onclick=\"location.reload()\">Refresh</button> "
+                "<button onclick=\"fetch('/logs/clear',{method:'POST'}).then(()=>location.reload())\">Clear</button></p>"
+                "<p><b>Reset reason:</b> " + hesc(currentResetReason) + "<br><b>Previous automatic restart:</b> " +
+                hesc(previousRestartReason.length() ? previousRestartReason : "none") + "</p><pre style='white-space:pre-wrap'>" +
+                hesc(readDiagnostics()) + "</pre></body>";
+  web.send(200, "text/html", page);
+}
+static void handleLogsJson() { web.send(200, "text/plain", readDiagnostics()); }
+static void handleClearLogs() { LittleFS.remove("/diagnostics.log"); diagLog("[diagnostics] log cleared"); web.send(200, "text/plain", "cleared"); }
 static void handleBan() {
   IPAddress ip; if (ip.fromString(web.arg("ip"))) { Dev* c = getClient((uint32_t)ip); if (c) { c->banned = !c->banned; saveBanned(); } }
   web.send(200, "text/plain", "ok");
@@ -249,7 +367,7 @@ static void handleUpload() {
     case UPLOAD_FILE_START:
       upOk = false; beginBlocklistSwap();
       upFile = LittleFS.open("/blocklist.new", "w");
-      Serial.printf("[ota] receiving %s\n", u.filename.c_str());
+      diagLog("[ota] receiving blocklist %s", u.filename.c_str());
       break;
     case UPLOAD_FILE_WRITE:
       if (upFile) upFile.write(u.buf, u.currentSize);
@@ -257,12 +375,12 @@ static void handleUpload() {
     case UPLOAD_FILE_END:
       if (upFile) upFile.close();
       upOk = commitNewBlocklist();
-      Serial.printf("[ota] %s -> %u domains\n", upOk ? "OK" : "REJECTED", numHashes);
+      diagLog("[ota] blocklist %s -> %u domains", upOk ? "OK" : "REJECTED", numHashes);
       break;
     case UPLOAD_FILE_ABORTED:
       if (upFile) upFile.close();
       LittleFS.remove("/blocklist.new"); reopenBlocklist();
-      Serial.println("[ota] aborted");
+      diagLog("[ota] blocklist upload aborted");
       break;
   }
 }
@@ -279,30 +397,31 @@ static void saveUpdateCfg() {
   f.println(updateUrl); f.println(updateIntervalH); f.close();
 }
 static bool fetchBlocklist(String url) {
-  url.trim(); if (!url.length()) { updateStatus = "no url set"; return false; }
-  Serial.printf("[remote] GET %s\n", url.c_str());
+  url.trim(); if (!url.length()) { updateStatus = "no url set"; diagLog("[remote] no update URL configured"); return false; }
+  diagLog("[remote] GET %s", url.c_str());
   WiFiClientSecure cs; cs.setInsecure();            // blocklist isn't secret -> skip cert pinning
   WiFiClient cl;
   HTTPClient http; http.setTimeout(20000);
   http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);  // GitHub release -> CDN redirect
   bool https = url.startsWith("https");
-  if (!(https ? http.begin(cs, url) : http.begin(cl, url))) { updateStatus = "begin failed"; return false; }
+  if (!(https ? http.begin(cs, url) : http.begin(cl, url))) { updateStatus = "begin failed"; diagLog("[remote] begin failed"); return false; }
   int code = http.GET();
-  if (code != HTTP_CODE_OK) { http.end(); updateStatus = "HTTP " + String(code); Serial.printf("[remote] %s\n", updateStatus.c_str()); return false; }
+  if (code != HTTP_CODE_OK) { http.end(); updateStatus = "HTTP " + String(code); diagLog("[remote] %s", updateStatus.c_str()); return false; }
   beginBlocklistSwap();
   File f = LittleFS.open("/blocklist.new", "w");
-  if (!f) { http.end(); updateStatus = "fs open failed"; reopenBlocklist(); return false; }
+  if (!f) { http.end(); updateStatus = "fs open failed"; reopenBlocklist(); diagLog("[remote] fs open failed"); return false; }
   WiFiClient* stream = http.getStreamPtr();
   int len = http.getSize(); uint8_t b[1024]; size_t total = 0; uint32_t idle = millis();
   while (http.connected() && (len < 0 || (int)total < len)) {
     size_t avail = stream->available();
     if (avail) { int n = stream->readBytes(b, avail > sizeof(b) ? sizeof(b) : avail); if (n > 0) { f.write(b, n); total += n; idle = millis(); } }
-    else { if (millis() - idle > 15000) break; delay(2); }
+    else { if (millis() - idle > 15000) break; feedWatchdog(); delay(2); }
+    feedWatchdog();
   }
   f.close(); http.end();
   bool ok = commitNewBlocklist();
   updateStatus = ok ? ("ok: " + String(numHashes) + " domains") : ("bad data (" + String(total) + "B)");
-  Serial.printf("[remote] %s\n", updateStatus.c_str());
+  diagLog("[remote] %s", updateStatus.c_str());
   return ok;
 }
 
@@ -310,20 +429,20 @@ static bool fetchBlocklist(String url) {
 static void handleFwUpdateDone() {
   bool ok = !Update.hasError();
   web.send(ok ? 200 : 500, "text/plain", ok ? "ok, rebooting" : "firmware update failed");
-  if (ok) { delay(300); ESP.restart(); }
+  if (ok) { diagLog("[fw-ota] update complete; restarting"); delay(300); ESP.restart(); }
 }
 static void handleFwUpload() {
   HTTPUpload& u = web.upload();
   if (u.status == UPLOAD_FILE_START) {
-    Serial.printf("[fw-ota] %s\n", u.filename.c_str());
+    diagLog("[fw-ota] receiving %s", u.filename.c_str());
     if (!Update.begin(UPDATE_SIZE_UNKNOWN)) Update.printError(Serial);
   } else if (u.status == UPLOAD_FILE_WRITE) {
     if (Update.write(u.buf, u.currentSize) != u.currentSize) Update.printError(Serial);
   } else if (u.status == UPLOAD_FILE_END) {
-    if (Update.end(true)) Serial.printf("[fw-ota] %u bytes OK\n", u.totalSize);
-    else Update.printError(Serial);
+    if (Update.end(true)) diagLog("[fw-ota] %u bytes OK", u.totalSize);
+    else { Update.printError(Serial); diagLog("[fw-ota] validation failed"); }
   } else if (u.status == UPLOAD_FILE_ABORTED) {
-    Update.abort(); Serial.println("[fw-ota] aborted");
+    Update.abort(); diagLog("[fw-ota] aborted");
   }
 }
 
@@ -342,7 +461,7 @@ static bool connectWiFi() {
   Serial.printf("WiFi: connecting to \"%s\"%s\n", ssid, ss.length() ? " (provisioned)" : " (secrets.h)");
   WiFi.mode(WIFI_STA); WiFi.setSleep(false); WiFi.begin(ssid, pass);
   uint32_t t0 = millis();
-  while (WiFi.status() != WL_CONNECTED && millis() - t0 < 20000) { delay(250); Serial.print("."); }
+  while (WiFi.status() != WL_CONNECTED && millis() - t0 < 20000) { feedWatchdog(); delay(250); Serial.print("."); }
   Serial.println();
   return WiFi.status() == WL_CONNECTED;
 }
@@ -366,6 +485,7 @@ static void handleWifiSave() {
   String ss = web.arg("s"), pw = web.arg("p");
   if (!ss.length()) { web.send(400, "text/plain", "missing WiFi name"); return; }
   prefs.begin("wifi", false); prefs.putString("ssid", ss); prefs.putString("pass", pw); prefs.end();
+  diagLog("[setup] WiFi credentials saved for %s", ss.c_str());
   web.send(200, "text/html", "<!doctype html><meta charset=utf-8><body style='font:16px system-ui;text-align:center;margin-top:60px'>"
                              "&#9989; Saved. Restarting and joining <b>" + ss + "</b>&hellip;<br><br>"
                              "Reconnect your phone to your normal WiFi, then find the box at <b>c3adblock.local</b>.</body>");
@@ -385,25 +505,27 @@ static void startConfigPortal() {
   web.on("/wifisave", HTTP_POST, handleWifiSave);
   web.onNotFound(handlePortalRoot);            // any captive-portal probe -> the form
   web.begin();
+  diagLog("[setup] provisioning portal started: %s", ap);
   Serial.printf("\n[setup] No WiFi. Join open network \"%s\" and a setup page pops up (or http://%s)\n",
                 ap, apIP.toString().c_str());
-  while (true) { dnsPortal.processNextRequest(); web.handleClient(); delay(2); }
+  while (true) { dnsPortal.processNextRequest(); web.handleClient(); feedWatchdog(); delay(2); }
 }
 
 void setup() {
   Serial.begin(115200); delay(300);
-  Serial.println("\n[c3-adblock] booting");
-  if (!LittleFS.begin(true)) Serial.println("LittleFS FAILED");
+  currentResetReason = resetReasonName(esp_reset_reason());
+  if (LittleFS.begin(true)) littleFsReady = true;
+  else Serial.println("LittleFS FAILED");
+  loadRestartReason();
+  esp_err_t wdtInit = esp_task_wdt_init(5, true);
+  esp_err_t wdtAdd = (wdtInit == ESP_OK || wdtInit == ESP_ERR_INVALID_STATE) ? esp_task_wdt_add(NULL) : wdtInit;
+  watchdogReady = wdtAdd == ESP_OK || wdtAdd == ESP_ERR_INVALID_ARG;
+  diagLog("[boot] reset=%s, watchdog=%s", currentResetReason.c_str(), watchdogReady ? "enabled" : "unavailable");
+  if (previousRestartReason.length()) diagLog("[boot] previous automatic restart: %s", previousRestartReason.c_str());
   blocklist = LittleFS.open(BLOCKLIST_PATH, "r");
   if (blocklist) { numHashes = blocklist.size() / HASH_BYTES; Serial.printf("blocklist: %u domains\n", numHashes); }
   loadCustom(); loadBanned(); loadUpdateCfg();
   Serial.printf("custom: %d, banned: %d\n", numCustom, numBanned);
-
-  // Hold BOOT (GPIO9) at power-on to wipe saved WiFi and force the setup portal.
-  pinMode(9, INPUT_PULLUP);
-  if (digitalRead(9) == LOW) { delay(60);
-    if (digitalRead(9) == LOW) { prefs.begin("wifi", false); prefs.clear(); prefs.end();
-      Serial.println("[setup] BOOT held -> cleared saved WiFi"); } }
 
   if (!connectWiFi()) startConfigPortal();   // portal blocks + reboots on save; returns only when connected
   Serial.printf("WiFi up: %s\n", WiFi.localIP().toString().c_str());
@@ -412,6 +534,9 @@ void setup() {
   dnsServer.begin(DNS_PORT); upstreamCli.begin(0);
   web.on("/", []() { web.send_P(200, "text/html", PAGE); });
   web.on("/stats.json", handleStats);
+  web.on("/logs", handleLogs);
+  web.on("/logs.json", handleLogsJson);
+  web.on("/logs/clear", HTTP_POST, handleClearLogs);
   web.on("/ban", handleBan);
   web.on("/addblock", []() { addCustom(web.arg("d")); web.send(200, "text/plain", "ok"); });
   web.on("/unblock", []() { removeCustom(web.arg("d")); web.send(200, "text/plain", "ok"); });
@@ -422,7 +547,7 @@ void setup() {
   });
   web.on("/resume", []() { blockingOn = true; resumeAt = 0; web.send(200, "text/plain", "resumed"); });
   web.on("/forgetwifi", []() { web.send(200, "text/plain", "cleared — rebooting into setup portal");
-    prefs.begin("wifi", false); prefs.clear(); prefs.end(); delay(500); ESP.restart(); });
+    diagLog("[setup] WiFi credentials cleared from dashboard"); prefs.begin("wifi", false); prefs.clear(); prefs.end(); delay(500); ESP.restart(); });
   web.on("/upload", HTTP_POST, handleUploadDone, handleUpload);      // blocklist OTA
   web.on("/update", HTTP_POST, handleFwUpdateDone, handleFwUpload);  // firmware OTA
   web.on("/fetchnow", []() { fetchBlocklist(updateUrl); web.send(200, "text/plain", updateStatus); });
@@ -438,6 +563,7 @@ void setup() {
 }
 
 void loop() {
+  feedWatchdog();
   ArduinoOTA.handle();
   web.handleClient();
   bool busy = handleDns();
@@ -447,5 +573,15 @@ void loop() {
     if (lastCheckMs == 0) lastCheckMs = now;   // skip an immediate fetch on boot
     else if (now - lastCheckMs >= updateIntervalH * 3600000UL) { lastCheckMs = now; fetchBlocklist(updateUrl); }
   }
+  if (WiFi.status() != WL_CONNECTED) {
+    if (!wifiDisconnectedSinceMs) { wifiDisconnectedSinceMs = millis(); diagLog("[wifi] connection lost"); }
+    else if (millis() - wifiDisconnectedSinceMs >= WIFI_DISCONNECTED_RESTART_MS)
+      restartForReliability("WiFi disconnected for too long");
+  } else if (wifiDisconnectedSinceMs) {
+    diagLog("[wifi] connection recovered after %lus", (millis() - wifiDisconnectedSinceMs) / 1000);
+    wifiDisconnectedSinceMs = 0;
+  }
+  if (dnsTotalSuccesses && dnsConsecutiveFailures && millis() - lastSuccessfulDnsMs >= DNS_NO_SUCCESS_RESTART_MS)
+    restartForReliability("no successful upstream DNS response for 60 seconds");
   if (!busy) delay(1);   // sleep only when idle: full speed under load, cool when quiet
 }

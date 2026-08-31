@@ -47,11 +47,12 @@ def read_source(src: str) -> str:
     if os.path.exists(src):
         return open(src, errors='ignore').read()
     print(f'  downloading {src} ...', file=sys.stderr)
-    return urllib.request.urlopen(src, timeout=180).read().decode('utf-8', 'ignore')
+    request = urllib.request.Request(src, headers={'User-Agent': 'esp32-c3-adblock/1.0'})
+    return urllib.request.urlopen(request, timeout=180).read().decode('utf-8', 'ignore')
 
 def main():
     args = sys.argv[1:]
-    out = args[0] if args else 'blocklist.bin'
+    out = args[0] if args else 'data/blocklist.bin'
     sources = args[1:] if len(args) > 1 else DEFAULT_SOURCES
 
     domains = set()

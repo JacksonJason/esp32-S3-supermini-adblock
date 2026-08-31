@@ -3,8 +3,8 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>C3 AdBlocker — flash it in your browser</title>
-<meta name="description" content="Flash the $2 ESP32-C3 network ad-blocker straight from your browser. No toolchain, no PlatformIO.">
+<title>S3 AdBlocker — flash it in your browser</title>
+<meta name="description" content="Flash the $2 ESP32-S3 network ad-blocker straight from your browser. No toolchain, no PlatformIO.">
 <script type="module" src="https://unpkg.com/esp-web-tools@10/dist/web/install-button.js?module"></script>
 <style>
   :root { color-scheme: dark; }
@@ -30,11 +30,11 @@
 </head>
 <body>
 <div class="wrap">
-  <h1>🛡️ <span class="g">C3 AdBlocker</span></h1>
-  <p class="sub">A network-wide DNS ad-blocker on a <span class="price">$2</span> ESP32-C3 — 141,000+ domains, no PSRAM. Flash it right here, no toolchain needed.</p>
+  <h1>🛡️ <span class="g">S3 AdBlocker</span></h1>
+  <p class="sub">A network-wide DNS ad-blocker on a <span class="price">$2</span> ESP32-S3 — 141,000+ domains, no PSRAM. Flash it right here, no toolchain needed.</p>
 
   <div class="card" style="text-align:center">
-    <p style="margin-top:0">Plug your ESP32-C3 into this computer, then:</p>
+    <p style="margin-top:0">Plug your ESP32-S3 into this computer, then:</p>
     <esp-web-install-button manifest="./manifest.json">
       <button slot="activate" style="font:600 17px system-ui;padding:14px 26px;border:0;border-radius:8px;background:#3fb950;color:#000;cursor:pointer">⚡ Connect &amp; Install</button>
       <span slot="unsupported" class="unsupported">Your browser can't flash — use <b>Chrome</b> or <b>Edge</b> on a desktop.</span>
@@ -50,10 +50,10 @@
   <div class="card">
     <b>What happens</b>
     <ol>
-      <li>Click <b>Connect &amp; Install</b> and pick your ESP32-C3's serial port.</li>
+      <li>Click <b>Connect &amp; Install</b> and pick your ESP32-S3's serial port.</li>
       <li>It flashes the firmware + a 141k-domain blocklist (~30s).</li>
-      <li>After it reboots, it makes a WiFi network called <code>C3-AdBlock-XXXX</code> — join it from your phone, pick your WiFi, type the password.</li>
-      <li>Set it as your router's secondary DNS (or per-device), and ads are blocked network-wide. Dashboard at <code>c3adblock.local</code>.</li>
+      <li>After it reboots, it makes a WiFi network called <code>S3-AdBlock-XXXX</code> — join it from your phone, pick your WiFi, type the password.</li>
+      <li>Set it as your router's secondary DNS (or per-device), and ads are blocked network-wide. Dashboard at <code>S3adblock.local</code>.</li>
     </ol>
     <p class="note">No WiFi credentials are baked into this build — you set them on-device, privately.</p>
   </div>
