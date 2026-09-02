@@ -261,6 +261,7 @@ static bool handleDns() {
     did = true;
     IPAddress cip = dnsServer.remoteIP(); uint16_t cport = dnsServer.remotePort();
     int qlen = dnsServer.read(buf, sizeof(buf));
+    dnsServer.flush();
     if (qlen >= 13) {
       char domain[256]; uint16_t qtype = 0; int qend = qlen;
       size_t dl = parseQuery(buf, qlen, domain, &qtype, &qend);
@@ -362,6 +363,7 @@ static void handleUploadDone() {
            upOk ? "ok" : "rejected: empty or size not a multiple of 5 (not a blocklist.bin?)");
 }
 static void handleUpload() {
+  feedWatchdog();
   HTTPUpload& u = web.upload();
   switch (u.status) {
     case UPLOAD_FILE_START:
@@ -432,6 +434,7 @@ static void handleFwUpdateDone() {
   if (ok) { diagLog("[fw-ota] update complete; restarting"); delay(300); ESP.restart(); }
 }
 static void handleFwUpload() {
+  feedWatchdog();
   HTTPUpload& u = web.upload();
   if (u.status == UPLOAD_FILE_START) {
     diagLog("[fw-ota] receiving %s", u.filename.c_str());
@@ -564,6 +567,10 @@ void setup() {
   });
   web.begin();
   ArduinoOTA.setHostname("c3adblock");   // pio run -t upload --upload-port c3adblock.local
+  ArduinoOTA.onStart([]() { diagLog("[arduino-ota] update started"); feedWatchdog(); });
+  ArduinoOTA.onProgress([](unsigned int, unsigned int) { feedWatchdog(); });
+  ArduinoOTA.onEnd([]() { diagLog("[arduino-ota] update complete"); });
+  ArduinoOTA.onError([](ota_error_t error) { diagLog("[arduino-ota] failed: %u", error); });
   ArduinoOTA.begin();
   Serial.println("DNS :53 + dashboard :80 + OTA up");
 }
