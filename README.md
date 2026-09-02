@@ -133,8 +133,9 @@ This fork adds recovery mechanisms intended for unattended network use:
 - A warning is recorded after 10 consecutive upstream DNS failures. The device restarts
   after 30 consecutive failures, after 60 seconds without a successful response following
   prior success, or after 30 seconds continuously disconnected from WiFi.
-- Important events are retained in LittleFS at `/diagnostics.log`, capped at about 12 KB
-  to limit flash wear. DNS queries are not logged individually.
+- Important events are retained in LittleFS at `/diagnostics.log`, capped at about 24 KB
+  to limit flash wear. Entries use UTC timestamps after NTP synchronization, with uptime
+  as a fallback during early boot. DNS queries are not logged individually.
 - Open `http://c3adblock.local/logs` for the reset reason, previous automatic restart
   reason, and persistent log. `GET /logs.json` returns the raw log; `POST /logs/clear`
   clears it. The dashboard's **Diagnostics** link opens the same page.

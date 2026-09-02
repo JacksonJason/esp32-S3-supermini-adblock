@@ -18,6 +18,7 @@
 #include "esp_system.h"
 #include "esp_task_wdt.h"
 #include <stdarg.h>
+#include <time.h>
 #include "lwip/etharp.h"
 #include "lwip/netif.h"
 #include "secrets.h"   // WIFI_SSID / WIFI_PASS — used only as a FALLBACK if no creds
@@ -33,7 +34,7 @@ static const uint32_t DNS_FAILURE_WARN_THRESHOLD = 10;
 static const uint32_t DNS_FAILURE_RESTART_THRESHOLD = 30;
 static const uint32_t DNS_NO_SUCCESS_RESTART_MS = 60000;
 static const uint32_t WIFI_DISCONNECTED_RESTART_MS = 30000;
-static const size_t DIAG_LOG_MAX_BYTES = 12288;
+static const size_t DIAG_LOG_MAX_BYTES = 24576;
 
 // ---- globals ----
 WiFiUDP dnsServer, upstreamCli;
@@ -84,9 +85,15 @@ static const char* resetReasonName(esp_reset_reason_t reason) {
     default: return "other";
   }
 }
+static void diagnosticTimestamp(char* out, size_t size) {
+  time_t now = time(nullptr); struct tm utc;
+  if (now > 1700000000 && gmtime_r(&now, &utc)) strftime(out, size, "%Y-%m-%dT%H:%M:%SZ", &utc);
+  else snprintf(out, size, "+%lus", millis() / 1000);
+}
 static void diagLog(const char* format, ...) {
   char message[240]; va_list args; va_start(args, format); vsnprintf(message, sizeof(message), format, args); va_end(args);
-  char line[280]; snprintf(line, sizeof(line), "[%lus] %s\n", millis() / 1000, message);
+  char timestamp[24]; diagnosticTimestamp(timestamp, sizeof(timestamp));
+  char line[280]; snprintf(line, sizeof(line), "[%s] %s\n", timestamp, message);
   Serial.print(line);
   if (!littleFsReady) return;
   File log = LittleFS.open("/diagnostics.log", "a"); if (!log) return;
@@ -532,6 +539,12 @@ void setup() {
 
   if (!connectWiFi()) startConfigPortal();   // portal blocks + reboots on save; returns only when connected
   Serial.printf("WiFi up: %s\n", WiFi.localIP().toString().c_str());
+  configTime(0, 0, "pool.ntp.org", "time.nist.gov");
+  time_t clockNow = time(nullptr); uint32_t clockStart = millis();
+  while (clockNow < 1700000000 && millis() - clockStart < 5000) {
+    feedWatchdog(); delay(100); clockNow = time(nullptr);
+  }
+  diagLog(clockNow >= 1700000000 ? "[time] NTP synchronized (UTC)" : "[time] NTP synchronization pending");
   if (MDNS.begin("c3adblock")) { MDNS.addService("http", "tcp", 80); Serial.println("dashboard: http://c3adblock.local"); }
 
   dnsServer.begin(DNS_PORT); upstreamCli.begin(0);
