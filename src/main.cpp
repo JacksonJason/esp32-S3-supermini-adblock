@@ -546,6 +546,12 @@ void setup() {
     web.send(200, "text/plain", "paused");
   });
   web.on("/resume", []() { blockingOn = true; resumeAt = 0; web.send(200, "text/plain", "resumed"); });
+  web.on("/reboot", HTTP_POST, []() {
+    web.send(200, "text/plain", "rebooting");
+    diagLog("[dashboard] manual reboot requested");
+    delay(300);
+    ESP.restart();
+  });
   web.on("/forgetwifi", []() { web.send(200, "text/plain", "cleared — rebooting into setup portal");
     diagLog("[setup] WiFi credentials cleared from dashboard"); prefs.begin("wifi", false); prefs.clear(); prefs.end(); delay(500); ESP.restart(); });
   web.on("/upload", HTTP_POST, handleUploadDone, handleUpload);      // blocklist OTA

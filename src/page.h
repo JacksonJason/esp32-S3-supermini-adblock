@@ -18,7 +18,7 @@ button{background:#21262d;color:#c9d1d9;border:1px solid #30363d;border-radius:5
 button:hover{background:#30363d}.ban{color:#f85149}input{background:#0d1117;border:1px solid #30363d;color:#c9d1d9;border-radius:5px;padding:6px}
 h2{font-size:14px;color:#8b949e;margin:18px 0 8px}
 </style></head><body>
-<header><h1>🛡️ S3 AdBlock <span id=host></span> <a href=/logs style="color:#8b949e;font-size:12px">Diagnostics</a></h1></header><div class=wrap>
+<header><h1>🛡️ S3 AdBlock <span id=host></span> <a href=/logs style="color:#8b949e;font-size:12px">Diagnostics</a> <button id=rebootbtn onclick=rebootDevice()>Reboot</button></h1></header><div class=wrap>
 <div id=blockbar style="display:flex;align-items:center;gap:12px;margin-bottom:14px;padding:12px 14px;background:#161b22;border:1px solid #30363d;border-radius:8px">
 <span id=blockdot style=font-size:20px>🛡️</span><b id=blockstate style=flex:1 data-on=1>Blocking active</b>
 <select id=pausedur style="background:#0d1117;border:1px solid #30363d;color:#c9d1d9;border-radius:5px;padding:5px"><option value=30>30s</option><option value=300 selected>5 min</option><option value=1800>30 min</option><option value=0>until I re-enable</option></select>
@@ -41,6 +41,7 @@ h2{font-size:14px;color:#8b949e;margin:18px 0 8px}
 </div><script>
 function fmt(n){return n.toLocaleString()}
 function togglePause(){if(blockstate.dataset.on=='1')fetch('/pause?s='+pausedur.value).then(load);else fetch('/resume').then(load);}
+function rebootDevice(){if(!confirm('Reboot the ad blocker now? DNS will be unavailable briefly.'))return;rebootbtn.disabled=true;rebootbtn.textContent='Rebooting...';fetch('/reboot',{method:'POST'});}
 async function load(){let s=await(await fetch('/stats.json')).json();
 host.textContent='@ '+s.ip;
 let on=s.blocking!==false;blockstate.dataset.on=on?'1':'0';
