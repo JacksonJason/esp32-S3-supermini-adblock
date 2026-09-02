@@ -539,9 +539,9 @@ void setup() {
 
   if (!connectWiFi()) startConfigPortal();   // portal blocks + reboots on save; returns only when connected
   Serial.printf("WiFi up: %s\n", WiFi.localIP().toString().c_str());
-  configTime(0, 0, "pool.ntp.org", "time.nist.gov");
+  configTime(0, 0, "129.6.15.28", "132.163.96.1");
   time_t clockNow = time(nullptr); uint32_t clockStart = millis();
-  while (clockNow < 1700000000 && millis() - clockStart < 5000) {
+  while (clockNow < 1700000000 && millis() - clockStart < 15000) {
     feedWatchdog(); delay(100); clockNow = time(nullptr);
   }
   diagLog(clockNow >= 1700000000 ? "[time] NTP synchronized (UTC)" : "[time] NTP synchronization pending");
