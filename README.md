@@ -88,10 +88,13 @@ pio device monitor          # -> http://c3adblock.local
 
 ### WiFi setup (no re-flash needed)
 
-If it can't connect (or you never set `secrets.h`), it starts an open access point
+If no WiFi network is configured (and you never set `secrets.h`), it starts an open access point
 **`C3-AdBlock-XXXX`** with a captive portal — join it from a phone, pick your network,
 type the password, done. To move it to a new network later, open
-`http://c3adblock.local/forgetwifi`. The C3-only GPIO9 BOOT-button reset behavior is
+`http://c3adblock.local/forgetwifi` while connected. If a configured network is
+unavailable at boot, the device keeps retrying it instead of entering the portal;
+restore that network or erase its WiFi settings to provision a different one.
+The C3-only GPIO9 BOOT-button reset behavior is
 intentionally not used on the S3 SuperMini.
 
 ## Over-the-air updates (no more USB)
@@ -132,10 +135,14 @@ This fork adds recovery mechanisms intended for unattended network use:
   DNS, download, WiFi connection, and provisioning loops feed it deliberately.
 - A warning is recorded after 10 consecutive upstream DNS failures. The device restarts
   after 30 consecutive failures, after 60 seconds without a successful response following
-  prior success, or after 30 seconds continuously disconnected from WiFi.
+  prior success, or after 30 seconds continuously disconnected from WiFi. After a
+  restart it keeps retrying configured WiFi credentials until the network returns.
 - Important events are retained in LittleFS at `/diagnostics.log`, capped at about 24 KB
-  to limit flash wear. Entries use UTC timestamps after NTP synchronization, with uptime
-  as a fallback during early boot. DNS queries are not logged individually.
+  to limit flash wear. NTP starts after DNS is listening, so it can resolve time-server
+  names even when the network uses this device for DNS. Entries use UTC timestamps
+  after synchronization; `uptime +Ns` explicitly marks entries before the clock is
+  available (for example after a reboot or if NTP is blocked). DNS queries are not
+  logged individually.
 - Open `http://c3adblock.local/logs` for the reset reason, previous automatic restart
   reason, and persistent log. `GET /logs.json` returns the raw log; `POST /logs/clear`
   clears it. The dashboard's **Diagnostics** link opens the same page.

@@ -45,7 +45,7 @@ uint8_t buf[600];
 uint8_t upstreamBuf[600];
 uint32_t dnsConsecutiveFailures = 0, dnsTotalFailures = 0, dnsTotalSuccesses = 0;
 uint32_t lastSuccessfulDnsMs = 0, wifiDisconnectedSinceMs = 0;
-bool littleFsReady = false, watchdogReady = false, restartPending = false;
+bool littleFsReady = false, watchdogReady = false, restartPending = false, timeSyncLogged = false;
 String currentResetReason, previousRestartReason;
 
 struct Dev { uint32_t ip; uint8_t mac[6]; uint32_t blocked, allowed, lastSeen; bool banned; String label; };
@@ -88,7 +88,7 @@ static const char* resetReasonName(esp_reset_reason_t reason) {
 static void diagnosticTimestamp(char* out, size_t size) {
   time_t now = time(nullptr); struct tm utc;
   if (now > 1700000000 && gmtime_r(&now, &utc)) strftime(out, size, "%Y-%m-%dT%H:%M:%SZ", &utc);
-  else snprintf(out, size, "+%lus", millis() / 1000);
+  else snprintf(out, size, "uptime +%lus", millis() / 1000);
 }
 static void diagLog(const char* format, ...) {
   char message[240]; va_list args; va_start(args, format); vsnprintf(message, sizeof(message), format, args); va_end(args);
@@ -459,7 +459,8 @@ static void handleFwUpload() {
 // ---------- WiFi provisioning (captive portal) ----------
 // Try provisioned NVS creds first, then the compile-time secrets.h creds as a
 // fallback (so the maintainer's own device + source builders keep working). If
-// neither connects, fall through to the config portal.
+// neither is configured, fall through to the config portal. With saved
+// credentials, keep retrying instead of turning a temporary outage into an AP.
 static bool connectWiFi() {
   prefs.begin("wifi", true);
   String ss = prefs.getString("ssid", "");
@@ -470,10 +471,18 @@ static bool connectWiFi() {
   if (!ssid || !*ssid || strcmp(ssid, "YOUR_WIFI_SSID") == 0) return false;  // unconfigured
   Serial.printf("WiFi: connecting to \"%s\"%s\n", ssid, ss.length() ? " (provisioned)" : " (secrets.h)");
   WiFi.mode(WIFI_STA); WiFi.setSleep(false); WiFi.begin(ssid, pass);
-  uint32_t t0 = millis();
-  while (WiFi.status() != WL_CONNECTED && millis() - t0 < 20000) { feedWatchdog(); delay(250); Serial.print("."); }
-  Serial.println();
-  return WiFi.status() == WL_CONNECTED;
+  unsigned int attempts = 0;
+  while (WiFi.status() != WL_CONNECTED) {
+    uint32_t t0 = millis();
+    while (WiFi.status() != WL_CONNECTED && millis() - t0 < 20000) { feedWatchdog(); delay(250); }
+    if (WiFi.status() == WL_CONNECTED) break;
+    attempts++;
+    if (attempts == 1 || attempts % 15 == 0)
+      diagLog("[wifi] connection attempt %u failed (status %d); retrying saved network", attempts, WiFi.status());
+    if (!WiFi.reconnect()) diagLog("[wifi] reconnect request failed");
+  }
+  if (attempts) diagLog("[wifi] connection recovered after %u attempts", attempts);
+  return true;
 }
 
 static void handlePortalRoot() {
@@ -537,14 +546,8 @@ void setup() {
   loadCustom(); loadBanned(); loadUpdateCfg();
   Serial.printf("custom: %d, banned: %d\n", numCustom, numBanned);
 
-  if (!connectWiFi()) startConfigPortal();   // portal blocks + reboots on save; returns only when connected
+  if (!connectWiFi()) startConfigPortal();   // portal only for an unconfigured device
   Serial.printf("WiFi up: %s\n", WiFi.localIP().toString().c_str());
-  configTime(0, 0, "129.6.15.28", "132.163.96.1");
-  time_t clockNow = time(nullptr); uint32_t clockStart = millis();
-  while (clockNow < 1700000000 && millis() - clockStart < 15000) {
-    feedWatchdog(); delay(100); clockNow = time(nullptr);
-  }
-  diagLog(clockNow >= 1700000000 ? "[time] NTP synchronized (UTC)" : "[time] NTP synchronization pending");
   if (MDNS.begin("c3adblock")) { MDNS.addService("http", "tcp", 80); Serial.println("dashboard: http://c3adblock.local"); }
 
   dnsServer.begin(DNS_PORT); upstreamCli.begin(0);
@@ -585,11 +588,17 @@ void setup() {
   ArduinoOTA.onEnd([]() { diagLog("[arduino-ota] update complete"); });
   ArduinoOTA.onError([](ota_error_t error) { diagLog("[arduino-ota] failed: %u", error); });
   ArduinoOTA.begin();
+  configTime(0, 0, "pool.ntp.org", "time.google.com", "time.cloudflare.com");
+  diagLog("[time] NTP synchronization pending (UTC)");
   Serial.println("DNS :53 + dashboard :80 + OTA up");
 }
 
 void loop() {
   feedWatchdog();
+  if (!timeSyncLogged && time(nullptr) > 1700000000) {
+    timeSyncLogged = true;
+    diagLog("[time] NTP synchronized (UTC)");
+  }
   ArduinoOTA.handle();
   web.handleClient();
   bool busy = handleDns();
